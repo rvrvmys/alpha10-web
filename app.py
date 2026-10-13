@@ -9,6 +9,7 @@ import json
 import re
 
 import pypdfium2 as pdfium
+from PIL import Image, ImageChops
 import requests
 import streamlit as st
 
@@ -95,17 +96,40 @@ def public_tabs(sheet_id: str) -> list[tuple[str, str]]:
     return out
 
 
-def pdf_to_pngs(data: bytes) -> list[bytes]:
+MAX_ZOOM = 2.0  # never enlarge a tab more than this when trimming its blank space
+
+
+def content_box(img: Image.Image) -> tuple[int, int, int, int] | None:
+    diff = ImageChops.difference(img, Image.new("RGB", img.size, "white")).convert("L")
+    return diff.point(lambda v: 255 if v > 12 else 0).getbbox()  # ignore near-white noise
+
+
+def pdf_to_pngs(data: bytes, pad: int = 24) -> list[bytes]:
+    """Render each page and crop the blank space around the content, so the tab fills the screen width
+    (bigger text). Every page of a tab gets the same left/right edges so its pages line up and share one zoom."""
     pdf = pdfium.PdfDocument(data)
-    pages = []
     try:
+        imgs = []
         for page in pdf:
-            buf = io.BytesIO()
-            page.render(scale=2).to_pil().save(buf, format="PNG", optimize=True)
-            pages.append(buf.getvalue())
+            imgs.append(page.render(scale=3).to_pil().convert("RGB"))
             page.close()
     finally:
         pdf.close()
+    boxes = [content_box(im) for im in imgs]
+    found = [bx for bx in boxes if bx]
+    if not found:
+        return []
+    width = imgs[0].width
+    left = max(min(bx[0] for bx in found) - pad, 0)
+    right = min(max(bx[2] for bx in found) + pad, width)
+    right = min(max(right, left + int(width / MAX_ZOOM)), width)
+    pages = []
+    for im, bx in zip(imgs, boxes):
+        if not bx:
+            continue  # blank page
+        buf = io.BytesIO()
+        im.crop((left, max(bx[1] - pad, 0), right, min(bx[3] + pad, im.height))).save(buf, format="PNG", optimize=True)
+        pages.append(buf.getvalue())
     return pages
 
 

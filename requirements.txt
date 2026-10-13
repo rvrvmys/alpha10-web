@@ -2,3 +2,4 @@ streamlit
 requests
 pypdfium2
 google-auth
+pillow
