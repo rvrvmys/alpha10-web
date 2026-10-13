@@ -3,7 +3,9 @@ The password and the Sheet ID live only in Streamlit secrets. The app exports ea
 shows it as an image, so formatting and charts look as in Google Sheets, the Google link never reaches anyone's
 browser, and there is no table to copy."""
 import hmac
+import html as htmllib
 import io
+import json
 import re
 
 import pypdfium2 as pdfium
@@ -57,7 +59,7 @@ def auth_headers() -> dict:
     return {"Authorization": f"Bearer {creds.token}"}
 
 
-def fetch(url: str, headers: dict) -> requests.Response:
+def fetch(url: str, headers: dict, html_ok: bool = False) -> requests.Response:
     try:
         r = requests.get(url, headers=headers, timeout=60)
     except requests.RequestException as exc:
@@ -65,7 +67,7 @@ def fetch(url: str, headers: dict) -> requests.Response:
     ctype = r.headers.get("Content-Type", "")
     if r.status_code == 404:
         raise SheetError("Google says no Sheet has this ID. Check sheet_id in the app's Secrets.")
-    if r.status_code in (401, 403) or "text/html" in ctype:
+    if r.status_code in (401, 403) or ("text/html" in ctype and not html_ok):
         raise SheetError(
             "Google refused the download. With a service account: share the Sheet with its client_email. "
             "Without one: set Share > General access to 'Anyone with the link' (Viewer) and, under the gear, "
@@ -74,6 +76,23 @@ def fetch(url: str, headers: dict) -> requests.Response:
     if r.status_code != 200:
         raise SheetError(f"Google answered with HTTP {r.status_code} ({ctype.split(';')[0] or 'no type'}).")
     return r
+
+
+def public_tabs(sheet_id: str) -> list[tuple[str, str]]:
+    """(title, gid) of each visible tab, read from the Sheet's public HTML view. Empty if Google changes that page."""
+    html = fetch(f"https://docs.google.com/spreadsheets/d/{sheet_id}/htmlview", {}, html_ok=True).text
+    tabs = re.findall(r'items\.push\(\{name: "((?:[^"\\]|\\.)*)",.*?gid: "(\d+)"', html)
+    if not tabs:
+        tabs = [(htmllib.unescape(name), gid) for gid, name in re.findall(r'id="sheet-button-(\d+)"[^>]*>\s*<a[^>]*>([^<]+)<', html)]
+    out = []
+    for name, gid in tabs:
+        try:  # names come JS-escaped, e.g. \x26 for &
+            name = json.loads('"' + re.sub(r"\\x([0-9a-fA-F]{2})", r"\\u00\1", name) + '"')
+        except ValueError:
+            pass
+        if (name, gid) not in out:
+            out.append((name, gid))
+    return out
 
 
 def pdf_to_pngs(data: bytes) -> list[bytes]:
@@ -96,8 +115,14 @@ def load_sheet(sheet_id: str) -> dict[str, list[bytes]]:
     headers = auth_headers()
     base = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?{PDF_OPTS}"
     if not headers:
-        # No API access without credentials, so tab names are unknown: show the whole workbook in one view.
-        return {"": pdf_to_pngs(fetch(base, headers).content)}
+        try:
+            tabs = public_tabs(sheet_id)
+        except Exception as exc:
+            print(f"tab list failed: {exc!r}")  # app log only
+            tabs = []
+        if not tabs:  # tab list unavailable: show the whole workbook in one view
+            return {"": pdf_to_pngs(fetch(base, headers).content)}
+        return {name: pdf_to_pngs(fetch(f"{base}&gid={gid}", headers).content) for name, gid in tabs}
     meta = fetch(f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}"
                  "?fields=sheets.properties(sheetId,title,hidden)", headers).json()
     tabs = {}
