@@ -49,13 +49,16 @@ def sheet_id_from(value: str) -> str:
 def auth_headers() -> dict:
     # With a service account in Secrets the Sheet can stay Restricted (shared only with that account).
     # Without one, the Sheet must be "Anyone with the link: Viewer" with downloads allowed for viewers.
-    if "gcp_service_account" not in st.secrets:
+    if "gcp_service_account_json" in st.secrets:  # the key file pasted as-is
+        info = json.loads(st.secrets["gcp_service_account_json"])
+    elif "gcp_service_account" in st.secrets:  # the key file's fields as a TOML table
+        info = dict(st.secrets["gcp_service_account"])
+    else:
         return {}
     from google.auth.transport.requests import Request
     from google.oauth2 import service_account
 
-    creds = service_account.Credentials.from_service_account_info(dict(st.secrets["gcp_service_account"]),
-                                                                  scopes=SCOPES)
+    creds = service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
     creds.refresh(Request())
     return {"Authorization": f"Bearer {creds.token}"}
 
