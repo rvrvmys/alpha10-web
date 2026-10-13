@@ -1,4 +1,4 @@
 streamlit
-pandas
-openpyxl
 requests
+pypdfium2
+google-auth
